@@ -187,12 +187,14 @@ with st.sidebar:
             column_config={"done": "不要"},
         )
 
-        # チェック状態が変わったら保存
+        # チェック状態が変わったら保存（インデックス差異を無視して比較）
         if "done" in gdf.columns:
             try:
-                if not edited["done"].equals(gdf_sorted["done"]):
+                original_done = gdf_sorted["done"].to_numpy()
+                edited_done = edited["done"].to_numpy()
+                if original_done.shape == edited_done.shape and (original_done != edited_done).any():
                     # 並び替え前の行順に対応させて反映
-                    gdf.loc[gdf_sorted.index, "done"] = edited["done"].values
+                    gdf.loc[gdf_sorted.index, "done"] = edited_done
                     gdf.to_csv(GLOBAL_PATH, index=False)
                     st.toast("全体申し送りの『不要』状態を更新しました。")
                     st.rerun()
