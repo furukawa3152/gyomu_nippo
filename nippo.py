@@ -164,12 +164,12 @@ def load_global_announcements() -> pd.DataFrame:
 st.set_page_config(page_title="業務日報", page_icon="📝", layout="wide")
 
 st.title("業務日報 / 全体申し送り")
-
 if "auth" not in st.session_state:
     st.session_state.auth = None
 
 with st.sidebar:
     st.header("全体への申し送り事項（最新順）")
+    st.write("※要件が終了したら、『不要』チェックを入れてください。")
     gdf = load_global_announcements()
     if not gdf.empty:
         # done=False を上、done=True を下へ。各グループ内は新しい日付が上
