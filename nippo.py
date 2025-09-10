@@ -27,7 +27,7 @@ if not os.path.exists(CRED_PATH):
 
 # グローバル申し送りCSV 初期化（存在しない場合のみ）
 if not os.path.exists(GLOBAL_PATH):
-    pd.DataFrame(columns=["date", "user_id", "display_name", "announcement"]).to_csv(GLOBAL_PATH, index=False)
+    pd.DataFrame(columns=["date", "user_id", "display_name", "announcement", "done"]).to_csv(GLOBAL_PATH, index=False)
 
 # =============================
 # ユーティリティ
@@ -123,8 +123,19 @@ def append_global_announcement(user_id: str, display_name: str, date_str: str, a
     try:
         df = pd.read_csv(GLOBAL_PATH)
     except Exception:
-        df = pd.DataFrame(columns=["date", "user_id", "display_name", "announcement"])  # 空
-    new_row = {"date": str(date_str)[:10], "user_id": user_id, "display_name": display_name, "announcement": announcement}
+        df = pd.DataFrame(columns=["date", "user_id", "display_name", "announcement", "done"])  # 空
+
+    # 互換: done 列が無い既存CSVの場合は追加
+    if "done" not in df.columns:
+        df["done"] = False
+
+    new_row = {
+        "date": str(date_str)[:10],
+        "user_id": user_id,
+        "display_name": display_name,
+        "announcement": announcement,
+        "done": False,
+    }
     df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
     df.to_csv(GLOBAL_PATH, index=False)
 
@@ -132,6 +143,11 @@ def append_global_announcement(user_id: str, display_name: str, date_str: str, a
 def load_global_announcements() -> pd.DataFrame:
     try:
         df = pd.read_csv(GLOBAL_PATH)
+        # 互換: done 列が無い場合は False で追加
+        if "done" not in df.columns:
+            df["done"] = False
+        else:
+            df["done"] = df["done"].fillna(False).astype(bool)
         if "date" in df.columns:
             try:
                 df["date_dt"] = pd.to_datetime(df["date"], errors="coerce")
@@ -139,7 +155,7 @@ def load_global_announcements() -> pd.DataFrame:
                 df["date_dt"] = pd.NaT
         return df
     except Exception:
-        return pd.DataFrame(columns=["date", "user_id", "display_name", "announcement", "date_dt"])  # 空
+        return pd.DataFrame(columns=["date", "user_id", "display_name", "announcement", "done", "date_dt"])  # 空
 
 
 # =============================
@@ -156,9 +172,32 @@ with st.sidebar:
     st.header("全体への申し送り事項（最新順）")
     gdf = load_global_announcements()
     if not gdf.empty:
-        gdf_sorted = gdf.sort_values(by=["date_dt"], ascending=False, na_position="last")
-        gdf_sorted_display = gdf_sorted[["date", "display_name", "announcement"]]
-        st.dataframe(gdf_sorted_display, use_container_width=True, hide_index=True)
+        # done=False を上、done=True を下へ。各グループ内は新しい日付が上
+        try:
+            gdf_sorted = gdf.sort_values(by=["done", "date_dt"], ascending=[True, False], na_position="last")
+        except Exception:
+            gdf_sorted = gdf
+
+        display_cols = [c for c in ["date", "display_name", "announcement", "done"] if c in gdf_sorted.columns]
+
+        edited = st.data_editor(
+            gdf_sorted[display_cols],
+            use_container_width=True,
+            hide_index=True,
+            column_config={"done": "不要"},
+        )
+
+        # チェック状態が変わったら保存
+        if "done" in gdf.columns:
+            try:
+                if not edited["done"].equals(gdf_sorted["done"]):
+                    # 並び替え前の行順に対応させて反映
+                    gdf.loc[gdf_sorted.index, "done"] = edited["done"].values
+                    gdf.to_csv(GLOBAL_PATH, index=False)
+                    st.toast("全体申し送りの『不要』状態を更新しました。")
+                    st.rerun()
+            except Exception:
+                pass
     else:
         st.info("まだ全体申し送りはありません。")
 
