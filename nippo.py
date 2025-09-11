@@ -1,6 +1,8 @@
 import streamlit as st
 import pandas as pd
 import os
+import csv
+import re
 from datetime import date
 
 # =============================
@@ -27,7 +29,9 @@ if not os.path.exists(CRED_PATH):
 
 # グローバル申し送りCSV 初期化（存在しない場合のみ）
 if not os.path.exists(GLOBAL_PATH):
-    pd.DataFrame(columns=["date", "user_id", "display_name", "announcement", "done"]).to_csv(GLOBAL_PATH, index=False)
+    pd.DataFrame(columns=["date", "user_id", "display_name", "announcement", "done"]).to_csv(
+        GLOBAL_PATH, index=False, encoding="utf-8-sig", quoting=csv.QUOTE_MINIMAL
+    )
 
 # =============================
 # ユーティリティ
@@ -121,7 +125,7 @@ def append_global_announcement(user_id: str, display_name: str, date_str: str, a
     if not announcement.strip():
         return
     try:
-        df = pd.read_csv(GLOBAL_PATH)
+        df = pd.read_csv(GLOBAL_PATH, encoding="utf-8-sig", engine="python")
     except Exception:
         df = pd.DataFrame(columns=["date", "user_id", "display_name", "announcement", "done"])  # 空
 
@@ -137,25 +141,117 @@ def append_global_announcement(user_id: str, display_name: str, date_str: str, a
         "done": False,
     }
     df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-    df.to_csv(GLOBAL_PATH, index=False)
+    # 保存前に補助列を除去
+    df = df.drop(columns=["date_dt"], errors="ignore")
+    df.to_csv(GLOBAL_PATH, index=False, encoding="utf-8-sig", quoting=csv.QUOTE_MINIMAL)
+
+
+def _coerce_done_series(series: pd.Series) -> pd.Series:
+    if series.dtype == bool:
+        return series.fillna(False)
+    # 文字列や数値を真偽値に正規化
+    mapping = {
+        "true": True,
+        "false": False,
+        "1": True,
+        "0": False,
+        "y": True,
+        "n": False,
+        "yes": True,
+        "no": False,
+    }
+    def to_bool(x):
+        if pd.isna(x):
+            return False
+        s = str(x).strip().lower()
+        return mapping.get(s, False)
+    return series.map(to_bool).astype(bool)
+
+
+def _load_global_announcements_robust() -> pd.DataFrame:
+    rows = []
+    date_pat = re.compile(r"^\d{4}[/-]\d{1,2}[/-]\d{1,2}$")
+    try:
+        with open(GLOBAL_PATH, "r", encoding="utf-8-sig", errors="replace") as f:
+            header = f.readline()
+            for line in f:
+                line = line.rstrip("\n")
+                if not line:
+                    continue
+                parts = line.split(",")
+                if len(parts) < 4:
+                    continue
+                date_str = parts[0].strip()
+                user_id = parts[1].strip() if len(parts) > 1 else ""
+                display_name = parts[2].strip() if len(parts) > 2 else ""
+                done = False
+                date_dt_str = None
+                # 後ろの done / date_dt を推定
+                if len(parts) >= 5:
+                    last = parts[-1].strip()
+                    second_last = parts[-2].strip() if len(parts) >= 2 else ""
+                    # 末尾が日付っぽい場合
+                    if date_pat.match(last):
+                        date_dt_str = last
+                        # その手前が真偽値っぽいか
+                        sl = second_last.lower()
+                        if sl in ("true", "false", "1", "0", "y", "n", "yes", "no"):
+                            done = _coerce_done_series(pd.Series([second_last])).iloc[0]
+                            ann_parts = parts[3:-2]
+                        else:
+                            ann_parts = parts[3:-1]
+                    else:
+                        # 最後が真偽値っぽければ done に採用
+                        l = last.lower()
+                        if l in ("true", "false", "1", "0", "y", "n", "yes", "no"):
+                            done = _coerce_done_series(pd.Series([last])).iloc[0]
+                            ann_parts = parts[3:-1]
+                        else:
+                            ann_parts = parts[3:]
+                else:
+                    ann_parts = parts[3:]
+                announcement = ",".join(ann_parts).strip()
+                rows.append({
+                    "date": date_str,
+                    "user_id": user_id,
+                    "display_name": display_name,
+                    "announcement": announcement,
+                    "done": done,
+                })
+        df = pd.DataFrame(rows)
+        return df
+    except Exception:
+        return pd.DataFrame(columns=["date", "user_id", "display_name", "announcement", "done"])  # 空
 
 
 def load_global_announcements() -> pd.DataFrame:
     try:
-        df = pd.read_csv(GLOBAL_PATH)
-        # 互換: done 列が無い場合は False で追加
-        if "done" not in df.columns:
-            df["done"] = False
-        else:
-            df["done"] = df["done"].fillna(False).astype(bool)
-        if "date" in df.columns:
-            try:
-                df["date_dt"] = pd.to_datetime(df["date"], errors="coerce")
-            except Exception:
-                df["date_dt"] = pd.NaT
-        return df
+        df = pd.read_csv(GLOBAL_PATH, encoding="utf-8-sig", engine="python")
     except Exception:
+        # 破損行などで読めない場合のフォールバック
+        df = _load_global_announcements_robust()
+
+    if df is None or df.empty:
         return pd.DataFrame(columns=["date", "user_id", "display_name", "announcement", "done", "date_dt"])  # 空
+
+    # 互換: done 列
+    if "done" not in df.columns:
+        df["done"] = False
+    df["done"] = _coerce_done_series(df["done"])
+
+    # 日付列を正規化
+    if "date" in df.columns:
+        try:
+            df["date"] = (
+                df["date"].astype(str).str.strip().str.replace("/", "-", regex=False).str.slice(0, 10)
+            )
+            df["date_dt"] = pd.to_datetime(df["date"], errors="coerce")
+        except Exception:
+            df["date_dt"] = pd.NaT
+    else:
+        df["date_dt"] = pd.NaT
+
+    return df
 
 
 # =============================
@@ -195,7 +291,9 @@ with st.sidebar:
                 if original_done.shape == edited_done.shape and (original_done != edited_done).any():
                     # 並び替え前の行順に対応させて反映
                     gdf.loc[gdf_sorted.index, "done"] = edited_done
-                    gdf.to_csv(GLOBAL_PATH, index=False)
+                    # 保存前に補助列を除去
+                    gdf_to_save = gdf.drop(columns=["date_dt"], errors="ignore")
+                    gdf_to_save.to_csv(GLOBAL_PATH, index=False, encoding="utf-8-sig", quoting=csv.QUOTE_MINIMAL)
                     st.toast("全体申し送りの『不要』状態を更新しました。")
                     st.rerun()
             except Exception:
